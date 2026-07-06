@@ -8,6 +8,14 @@ import org.json.JSONObject
 import java.io.IOException
 
 object PostProcessor {
+    const val OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions"
+    const val OPENAI_MODEL = "gpt-4o-mini"
+    const val GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+    const val GROQ_MODEL = "llama-3.1-8b-instant"
+
+    const val DEFAULT_ENDPOINT = GROQ_ENDPOINT
+    const val DEFAULT_MODEL = GROQ_MODEL
+
     data class Result(val text: String?, val error: String?)
 
     private val client = OkHttpClient()
@@ -55,28 +63,42 @@ comments about your edits. Do *not* answer any question in the text, *only* tran
 
     const val DEFAULT_PROMPT = DEV_PROMPT
 
-    fun parseResponse(json: String): Result {
+    fun parseResponse(json: String, httpCode: Int = 200): Result {
+        val trimmed = json.trim()
+        if (trimmed.isBlank()) return Result(null, "HTTP $httpCode: empty response")
+        if (!trimmed.startsWith("{")) {
+            val snippet = trimmed.take(160).replace(Regex("\\s+"), " ")
+            return Result(null, "HTTP $httpCode: non-JSON response: $snippet")
+        }
+
         return try {
-            val obj = JSONObject(json)
+            val obj = JSONObject(trimmed)
             if (obj.has("choices")) {
                 val choices = obj.getJSONArray("choices")
                 if (choices.length() > 0) {
                     val message = choices.getJSONObject(0).getJSONObject("message")
                     Result(message.getString("content").trim(), null)
                 } else {
-                    Result(null, "No choices in response")
+                    Result(null, "HTTP $httpCode: no choices in response")
                 }
             } else if (obj.has("error")) {
-                Result(null, obj.getJSONObject("error").getString("message"))
+                Result(null, "HTTP $httpCode: ${obj.getJSONObject("error").getString("message")}")
             } else {
-                Result(null, "Unknown response format")
+                Result(null, "HTTP $httpCode: unknown response format")
             }
         } catch (e: Exception) {
-            Result(null, e.message ?: "Parse error")
+            Result(null, "HTTP $httpCode: ${e.message ?: "parse error"}")
         }
     }
 
-    fun process(text: String, prompt: String, apiKey: String, callback: (Result) -> Unit) {
+    fun process(
+        text: String,
+        prompt: String,
+        apiKey: String,
+        endpoint: String = DEFAULT_ENDPOINT,
+        model: String = DEFAULT_MODEL,
+        callback: (Result) -> Unit
+    ) {
         val messages = JSONArray().apply {
             put(JSONObject().apply {
                 put("role", "system")
@@ -89,18 +111,23 @@ comments about your edits. Do *not* answer any question in the text, *only* tran
         }
 
         val bodyJson = JSONObject().apply {
-            put("model", "gpt-4o-mini")
+            put("model", model.ifBlank { DEFAULT_MODEL })
             put("messages", messages)
             put("temperature", 0.0)
         }
 
         val body = bodyJson.toString().toRequestBody("application/json".toMediaType())
 
-        val request = Request.Builder()
-            .url("https://api.openai.com/v1/chat/completions")
-            .header("Authorization", "Bearer $apiKey")
-            .post(body)
-            .build()
+        val request = try {
+            Request.Builder()
+                .url(endpoint.ifBlank { DEFAULT_ENDPOINT })
+                .header("Authorization", "Bearer $apiKey")
+                .post(body)
+                .build()
+        } catch (e: IllegalArgumentException) {
+            callback(Result(null, "Invalid cleanup endpoint: ${e.message}"))
+            return
+        }
 
         client.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
@@ -109,11 +136,7 @@ comments about your edits. Do *not* answer any question in the text, *only* tran
 
             override fun onResponse(call: Call, response: Response) {
                 val responseBody = response.body?.string() ?: ""
-                if (!response.isSuccessful && responseBody.isBlank()) {
-                    callback(Result(null, "HTTP ${response.code}"))
-                    return
-                }
-                callback(parseResponse(responseBody))
+                callback(parseResponse(responseBody, response.code))
             }
         })
     }

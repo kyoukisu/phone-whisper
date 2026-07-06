@@ -331,7 +331,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         state = State.RECORDING
         setBusy(false)
         setAppearance(COLOR_RECORDING)
-        startPulse()
+        stopPulse()
 
         thread {
             val buf = ByteArray(bufSize)
@@ -398,10 +398,15 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     private fun transcribeApi(pcm: ByteArray) {
         val wav = WavWriter.encode(pcm)
+        migrateGroqDefaultsIfNeeded()
         val apiKey = prefs().getString("api_key", "") ?: ""
         if (apiKey.isBlank()) { reset("Set API key in Phone Whisper app"); return }
 
-        TranscriberClient.transcribe(wav, apiKey) { result ->
+        val endpoint = prefs().getString("stt_endpoint", TranscriberClient.DEFAULT_ENDPOINT) ?: TranscriberClient.DEFAULT_ENDPOINT
+        val model = prefs().getString("stt_model", TranscriberClient.DEFAULT_MODEL) ?: TranscriberClient.DEFAULT_MODEL
+        val language = prefs().getString("stt_language", TranscriberClient.DEFAULT_LANGUAGE) ?: TranscriberClient.DEFAULT_LANGUAGE
+
+        TranscriberClient.transcribe(wav, apiKey, endpoint, model, language) { result ->
             if (result.text != null && result.text.isNotBlank()) {
                 handleTranscriptionResult(result.text)
             } else {
@@ -416,7 +421,8 @@ class WhisperAccessibilityService : AccessibilityService() {
     }
 
     private fun handleTranscriptionResult(text: String?) {
-        if (text.isNullOrBlank()) {
+        val transcript = text?.trim().orEmpty()
+        if (transcript.isBlank()) {
             handler.post {
                 toast("No speech detected")
                 state = State.IDLE
@@ -426,6 +432,7 @@ class WhisperAccessibilityService : AccessibilityService() {
             return
         }
 
+        migrateGroqDefaultsIfNeeded()
         val usePostProcessing = prefs().getBoolean("use_post_processing", false)
         val apiKey = prefs().getString("api_key", "") ?: ""
 
@@ -433,7 +440,7 @@ class WhisperAccessibilityService : AccessibilityService() {
             if (apiKey.isBlank()) {
                 handler.post {
                     toast("Post-processing needs API key. Using raw text.")
-                    injectText(text)
+                    injectText(transcript)
                     state = State.IDLE
                     setBusy(false)
                     setAppearance(COLOR_IDLE)
@@ -443,12 +450,15 @@ class WhisperAccessibilityService : AccessibilityService() {
 
             val prompt = prefs().getString("post_processing_prompt", PostProcessor.DEFAULT_PROMPT) ?: PostProcessor.DEFAULT_PROMPT
             
-            PostProcessor.process(text, prompt, apiKey) { result ->
+            val endpoint = prefs().getString("chat_endpoint", PostProcessor.DEFAULT_ENDPOINT) ?: PostProcessor.DEFAULT_ENDPOINT
+            val model = prefs().getString("chat_model", PostProcessor.DEFAULT_MODEL) ?: PostProcessor.DEFAULT_MODEL
+
+            PostProcessor.process(transcript, prompt, apiKey, endpoint, model) { result ->
                 handler.post {
                     if (result.text != null && result.text.isNotBlank()) {
-                        injectText(result.text)
+                        injectText(result.text.trim())
                     } else {
-                        injectText(text, feedback = "Cleanup failed — raw copied to clipboard", feedbackDurationMs = 3000)
+                        injectText(transcript, feedback = "Cleanup failed — inserted raw text", feedbackDurationMs = 3000)
                     }
                     state = State.IDLE
                     setBusy(false)
@@ -457,7 +467,7 @@ class WhisperAccessibilityService : AccessibilityService() {
             }
         } else {
             handler.post {
-                injectText(text)
+                injectText(transcript)
                 state = State.IDLE
                 setBusy(false)
                 setAppearance(COLOR_IDLE)
@@ -476,12 +486,17 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     private fun injectText(
         text: String,
-        feedback: String? = "Copied to clipboard",
+        feedback: String? = "Inserted",
         feedbackDurationMs: Long = 2000
     ) {
-        val clip = ClipData.newPlainText("phonewhisper", text)
-        (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(clip)
-        feedback?.let { showFeedback(it, feedbackDurationMs) }
+        var clipboardSet = false
+        fun ensureClipboard() {
+            if (!clipboardSet) {
+                val clip = ClipData.newPlainText("phonewhisper", text)
+                (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(clip)
+                clipboardSet = true
+            }
+        }
 
         val candidates = findInjectionCandidates()
         Log.i(TAG, "Injecting text into ${candidates.size} candidate node(s)")
@@ -489,7 +504,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         var injected = false
         try {
             for (candidate in candidates) {
-                if (tryInjectIntoNode(candidate, text)) {
+                if (tryInjectIntoNode(candidate, text, ::ensureClipboard)) {
                     injected = true
                     break
                 }
@@ -498,7 +513,14 @@ class WhisperAccessibilityService : AccessibilityService() {
             candidates.forEach { it.recycle() }
         }
 
-        Log.i(TAG, if (injected) "Text injection action reported success" else "No injection action succeeded; clipboard fallback only")
+        if (injected) {
+            feedback?.let { showFeedback(it, feedbackDurationMs) }
+            Log.i(TAG, "Text injection action reported success")
+        } else {
+            ensureClipboard()
+            showFeedback("Copied to clipboard", feedbackDurationMs)
+            Log.i(TAG, "No injection action succeeded; clipboard fallback only")
+        }
     }
 
     private fun findInjectionCandidates(): List<AccessibilityNodeInfo> {
@@ -572,25 +594,19 @@ class WhisperAccessibilityService : AccessibilityService() {
         return score
     }
 
-    private fun tryInjectIntoNode(node: AccessibilityNodeInfo, text: String): Boolean {
+    private fun tryInjectIntoNode(
+        node: AccessibilityNodeInfo,
+        text: String,
+        ensureClipboard: () -> Unit
+    ): Boolean {
         logNode("Trying node", node)
 
         node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
 
-        findCustomPasteAction(node)?.let { action ->
-            val ok = node.performAction(action.id)
-            Log.i(TAG, "Custom action '${action.label}' (${action.id}) => $ok")
-            if (ok) return true
-        }
-
-        val pasteOk = node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
-        Log.i(TAG, "ACTION_PASTE => $pasteOk")
-        if (pasteOk) return true
-
         if (node.isEditable || node.className?.toString()?.contains("EditText") == true) {
-            val current = node.text?.toString().orEmpty()
-            val start = if (node.textSelectionStart >= 0) node.textSelectionStart else current.length
-            val end = if (node.textSelectionEnd >= 0) node.textSelectionEnd else start
+            val current = editableTextWithoutPlaceholder(node)
+            val start = if (node.textSelectionStart >= 0) node.textSelectionStart.coerceIn(0, current.length) else current.length
+            val end = if (node.textSelectionEnd >= 0) node.textSelectionEnd.coerceIn(0, current.length) else start
             val replacementStart = minOf(start, end)
             val replacementEnd = maxOf(start, end)
             val updated = current.replaceRange(replacementStart, replacementEnd, text)
@@ -605,6 +621,18 @@ class WhisperAccessibilityService : AccessibilityService() {
             if (setTextOk) return true
         }
 
+        findCustomPasteAction(node)?.let { action ->
+            ensureClipboard()
+            val ok = node.performAction(action.id)
+            Log.i(TAG, "Custom paste action (${action.id}) => $ok")
+            if (ok) return true
+        }
+
+        ensureClipboard()
+        val pasteOk = node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+        Log.i(TAG, "ACTION_PASTE => $pasteOk")
+        if (pasteOk) return true
+
         return false
     }
 
@@ -613,14 +641,77 @@ class WhisperAccessibilityService : AccessibilityService() {
             action.label?.toString()?.contains("paste", ignoreCase = true) == true
         }
 
+    private fun editableTextWithoutPlaceholder(node: AccessibilityNodeInfo): String {
+        val current = node.text?.toString().orEmpty()
+        if (current.isBlank()) return current
+
+        val hint = node.hintText?.toString().orEmpty()
+        if (hint.isNotBlank() && current == hint) return ""
+
+        val normalized = current.trim().trimEnd('.', '…').lowercase()
+        val commonPlaceholders = setOf(
+            "message",
+            "write a message",
+            "type a message",
+            "text message",
+            "сообщение",
+            "написать сообщение",
+            "введите сообщение",
+            "напишите сообщение",
+            "повідомлення",
+            "написати повідомлення"
+        )
+        if (normalized in commonPlaceholders) return ""
+
+        return current
+    }
+
     private fun logNode(prefix: String, node: AccessibilityNodeInfo) {
-        val actions = node.actionList.joinToString { action ->
-            action.label?.toString() ?: action.id.toString()
-        }
         Log.i(
             TAG,
-            "$prefix package=${node.packageName} class=${node.className} focused=${node.isFocused} editable=${node.isEditable} text=${node.text} desc=${node.contentDescription} actions=[$actions]"
+            "$prefix package=${node.packageName} class=${node.className} focused=${node.isFocused} editable=${node.isEditable} actionCount=${node.actionList.size}"
         )
+    }
+
+    private fun migrateGroqDefaultsIfNeeded() {
+        val p = prefs()
+        val apiKey = p.getString("api_key", "").orEmpty()
+        if (!apiKey.startsWith("gsk_")) return
+
+        val edit = p.edit()
+        var changed = false
+
+        fun putStringIfNeeded(key: String, value: String) {
+            edit.putString(key, value)
+            changed = true
+        }
+
+        val sttEndpoint = p.getString("stt_endpoint", "").orEmpty()
+        if (!sttEndpoint.startsWith("https://api.groq.com/")) {
+            putStringIfNeeded("stt_endpoint", TranscriberClient.GROQ_ENDPOINT)
+        }
+
+        val sttModel = p.getString("stt_model", "").orEmpty()
+        if (sttModel.isBlank() || sttModel == TranscriberClient.OPENAI_MODEL) {
+            putStringIfNeeded("stt_model", TranscriberClient.GROQ_MODEL)
+        }
+
+        val sttLanguage = p.getString("stt_language", "").orEmpty()
+        if (sttLanguage.isBlank()) {
+            putStringIfNeeded("stt_language", TranscriberClient.DEFAULT_LANGUAGE)
+        }
+
+        val chatEndpoint = p.getString("chat_endpoint", "").orEmpty()
+        if (!chatEndpoint.startsWith("https://api.groq.com/")) {
+            putStringIfNeeded("chat_endpoint", PostProcessor.GROQ_ENDPOINT)
+        }
+
+        val chatModel = p.getString("chat_model", "").orEmpty()
+        if (chatModel.isBlank() || chatModel == PostProcessor.OPENAI_MODEL) {
+            putStringIfNeeded("chat_model", PostProcessor.GROQ_MODEL)
+        }
+
+        if (changed) edit.apply()
     }
 
     private fun prefs() = getSharedPreferences("phonewhisper", MODE_PRIVATE)

@@ -50,7 +50,7 @@ class PostProcessorTest {
 
         val result = PostProcessor.parseResponse(json)
         assertEquals(null, result.text)
-        assertEquals("Incorrect API key provided.", result.error)
+        assertEquals("HTTP 200: Incorrect API key provided.", result.error)
     }
 
     @Test
@@ -63,16 +63,13 @@ class PostProcessorTest {
 
         val result = PostProcessor.parseResponse(json)
         assertEquals(null, result.text)
-        assertEquals("No choices in response", result.error)
+        assertEquals("HTTP 200: no choices in response", result.error)
     }
 
     @Test
     fun parseInvalidJson() {
         val result = PostProcessor.parseResponse("invalid json")
         assertEquals(null, result.text)
-        assertTrue(
-            result.error?.contains("JSONObject") == true ||
-                result.error?.contains("must begin with '{'") == true
-        )
+        assertTrue(result.error?.contains("non-JSON response") == true)
     }
 }

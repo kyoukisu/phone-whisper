@@ -28,6 +28,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var audioRowSub: TextView
     private lateinit var accRowSub: TextView
     private lateinit var keyRowSub: TextView
+    private lateinit var sttEndpointRowSub: TextView
+    private lateinit var sttModelRowSub: TextView
+    private lateinit var languageRowSub: TextView
+    private lateinit var chatEndpointRowSub: TextView
+    private lateinit var chatModelRowSub: TextView
     private lateinit var promptRowSub: TextView
     private lateinit var promptRow: LinearLayout
     private lateinit var modelContainer: LinearLayout
@@ -91,7 +96,7 @@ class MainActivity : AppCompatActivity() {
             isChecked = isCloud
             isClickable = false
         }
-        val cloudRow = settingsRow("Use cloud transcription", "Requires OpenAI API key", cloudSwitch) {
+        val cloudRow = settingsRow("Use cloud transcription", "Requires Groq/OpenAI-compatible API key", cloudSwitch) {
             val newCloud = !cloudSwitch.isChecked
             prefs().edit().putBoolean("use_local", !newCloud).apply()
             cloudSwitch.isChecked = newCloud
@@ -113,7 +118,7 @@ class MainActivity : AppCompatActivity() {
             isChecked = isPostProcessing
             isClickable = false
         }
-        val postProcessRow = settingsRow("Cleanup transcript", "Uses OpenAI Chat API to fix grammar and punctuation", postProcessSwitch) {
+        val postProcessRow = settingsRow("Cleanup transcript", "Uses configured chat API to fix grammar and punctuation", postProcessSwitch) {
             val newVal = !postProcessSwitch.isChecked
             prefs().edit().putBoolean("use_post_processing", newVal).apply()
             postProcessSwitch.isChecked = newVal
@@ -134,9 +139,64 @@ class MainActivity : AppCompatActivity() {
         // --- Settings Section ---
         root.addView(sectionHeader("Settings"))
         
-        val keyRow = settingsRow("OpenAI API Key", "Tap to set") { promptApiKey() }
+        val keyRow = settingsRow("API key", "Tap to set") { promptApiKey() }
         keyRowSub = keyRow.findViewWithTag("subtitle")
         root.addView(keyRow)
+
+        val sttEndpointRow = settingsRow("STT endpoint", sttEndpoint()) {
+            promptStringSetting(
+                title = "STT endpoint",
+                prefKey = "stt_endpoint",
+                defaultValue = TranscriberClient.DEFAULT_ENDPOINT,
+                hint = "https://api.groq.com/openai/v1/audio/transcriptions"
+            )
+        }
+        sttEndpointRowSub = sttEndpointRow.findViewWithTag("subtitle")
+        root.addView(sttEndpointRow)
+
+        val sttModelRow = settingsRow("STT model", sttModel()) {
+            promptStringSetting(
+                title = "STT model",
+                prefKey = "stt_model",
+                defaultValue = TranscriberClient.DEFAULT_MODEL,
+                hint = "whisper-large-v3-turbo"
+            )
+        }
+        sttModelRowSub = sttModelRow.findViewWithTag("subtitle")
+        root.addView(sttModelRow)
+
+        val languageRow = settingsRow("Language", languageSummary()) {
+            promptStringSetting(
+                title = "Language code",
+                prefKey = "stt_language",
+                defaultValue = TranscriberClient.DEFAULT_LANGUAGE,
+                hint = "ru"
+            )
+        }
+        languageRowSub = languageRow.findViewWithTag("subtitle")
+        root.addView(languageRow)
+
+        val chatEndpointRow = settingsRow("Cleanup endpoint", chatEndpoint()) {
+            promptStringSetting(
+                title = "Cleanup endpoint",
+                prefKey = "chat_endpoint",
+                defaultValue = PostProcessor.DEFAULT_ENDPOINT,
+                hint = "https://api.groq.com/openai/v1/chat/completions"
+            )
+        }
+        chatEndpointRowSub = chatEndpointRow.findViewWithTag("subtitle")
+        root.addView(chatEndpointRow)
+
+        val chatModelRow = settingsRow("Cleanup model", chatModel()) {
+            promptStringSetting(
+                title = "Cleanup model",
+                prefKey = "chat_model",
+                defaultValue = PostProcessor.DEFAULT_MODEL,
+                hint = "llama-3.1-8b-instant"
+            )
+        }
+        chatModelRowSub = chatModelRow.findViewWithTag("subtitle")
+        root.addView(chatModelRow)
 
         setContentView(ScrollView(this).apply {
             setBackgroundColor(attrColor(android.R.attr.colorBackground))
@@ -304,6 +364,8 @@ class MainActivity : AppCompatActivity() {
     // --- State Updates ---
 
     private fun refresh() {
+        migrateGroqDefaultsIfNeeded()
+
         val audio = hasPerm(Manifest.permission.RECORD_AUDIO)
         val acc = WhisperAccessibilityService.instance != null
         val useLocal = prefs().getBoolean("use_local", true)
@@ -319,9 +381,13 @@ class MainActivity : AppCompatActivity() {
         promptRow.visibility = if (usePostProcessing) View.VISIBLE else View.GONE
 
         val apiKey = prefs().getString("api_key", "") ?: ""
-        keyRowSub.text = if (apiKey.isBlank()) "Tap to set" 
-                         else if (apiKey.length > 7) "sk-...${apiKey.takeLast(4)}" 
-                         else "sk-...***"
+        keyRowSub.text = if (apiKey.isBlank()) "Tap to set"
+                         else "••••${apiKey.takeLast(4)}"
+        sttEndpointRowSub.text = sttEndpoint()
+        sttModelRowSub.text = sttModel()
+        languageRowSub.text = languageSummary()
+        chatEndpointRowSub.text = chatEndpoint()
+        chatModelRowSub.text = chatModel()
 
         val prompt = currentPrompt()
         promptRowSub.text = prompt
@@ -347,14 +413,42 @@ class MainActivity : AppCompatActivity() {
 
     private fun promptApiKey() {
         val input = EditText(this).apply {
-            hint = "sk-..."
+            hint = "API key"
             setText(prefs().getString("api_key", ""))
         }
         android.app.AlertDialog.Builder(this)
-            .setTitle("OpenAI API Key")
+            .setTitle("API key")
             .setView(input.apply { setPadding(dp(24), dp(8), dp(24), dp(8)) })
             .setPositiveButton("Save") { _, _ ->
                 prefs().edit().putString("api_key", input.text.toString().trim()).apply()
+                refresh()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun promptStringSetting(
+        title: String,
+        prefKey: String,
+        defaultValue: String,
+        hint: String
+    ) {
+        val input = EditText(this).apply {
+            this.hint = hint
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setText(prefs().getString(prefKey, defaultValue) ?: defaultValue)
+            setSelectAllOnFocus(true)
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(input.apply { setPadding(dp(24), dp(8), dp(24), dp(8)) })
+            .setPositiveButton("Save") { _, _ ->
+                val value = input.text.toString().trim()
+                prefs().edit().putString(prefKey, value.ifBlank { defaultValue }).apply()
+                refresh()
+            }
+            .setNeutralButton("Reset") { _, _ ->
+                prefs().edit().putString(prefKey, defaultValue).apply()
                 refresh()
             }
             .setNegativeButton("Cancel", null)
@@ -439,8 +533,55 @@ class MainActivity : AppCompatActivity() {
         setPadding(padH, padV, padH, padV)
     }
 
+    private fun migrateGroqDefaultsIfNeeded() {
+        val p = prefs()
+        val apiKey = p.getString("api_key", "").orEmpty()
+        if (!apiKey.startsWith("gsk_")) return
+
+        val edit = p.edit()
+        var changed = false
+
+        fun putStringIfNeeded(key: String, value: String) {
+            edit.putString(key, value)
+            changed = true
+        }
+
+        val sttEndpoint = p.getString("stt_endpoint", "").orEmpty()
+        if (!sttEndpoint.startsWith("https://api.groq.com/")) {
+            putStringIfNeeded("stt_endpoint", TranscriberClient.GROQ_ENDPOINT)
+        }
+
+        val sttModel = p.getString("stt_model", "").orEmpty()
+        if (sttModel.isBlank() || sttModel == TranscriberClient.OPENAI_MODEL) {
+            putStringIfNeeded("stt_model", TranscriberClient.GROQ_MODEL)
+        }
+
+        val sttLanguage = p.getString("stt_language", "").orEmpty()
+        if (sttLanguage.isBlank()) {
+            putStringIfNeeded("stt_language", TranscriberClient.DEFAULT_LANGUAGE)
+        }
+
+        val chatEndpoint = p.getString("chat_endpoint", "").orEmpty()
+        if (!chatEndpoint.startsWith("https://api.groq.com/")) {
+            putStringIfNeeded("chat_endpoint", PostProcessor.GROQ_ENDPOINT)
+        }
+
+        val chatModel = p.getString("chat_model", "").orEmpty()
+        if (chatModel.isBlank() || chatModel == PostProcessor.OPENAI_MODEL) {
+            putStringIfNeeded("chat_model", PostProcessor.GROQ_MODEL)
+        }
+
+        if (changed) edit.apply()
+    }
+
     private fun currentPrompt() = prefs().getString("post_processing_prompt", PostProcessor.DEFAULT_PROMPT) ?: PostProcessor.DEFAULT_PROMPT
     private fun customPrompt() = prefs().getString("custom_post_processing_prompt", PostProcessor.DEFAULT_PROMPT) ?: PostProcessor.DEFAULT_PROMPT
+    private fun sttEndpoint() = prefs().getString("stt_endpoint", TranscriberClient.DEFAULT_ENDPOINT) ?: TranscriberClient.DEFAULT_ENDPOINT
+    private fun sttModel() = prefs().getString("stt_model", TranscriberClient.DEFAULT_MODEL) ?: TranscriberClient.DEFAULT_MODEL
+    private fun sttLanguage() = prefs().getString("stt_language", TranscriberClient.DEFAULT_LANGUAGE) ?: TranscriberClient.DEFAULT_LANGUAGE
+    private fun chatEndpoint() = prefs().getString("chat_endpoint", PostProcessor.DEFAULT_ENDPOINT) ?: PostProcessor.DEFAULT_ENDPOINT
+    private fun chatModel() = prefs().getString("chat_model", PostProcessor.DEFAULT_MODEL) ?: PostProcessor.DEFAULT_MODEL
+    private fun languageSummary() = sttLanguage().ifBlank { "Auto" }
 
     private fun customPromptSummary(): String {
         val prompt = customPrompt()

@@ -11,10 +11,16 @@ class TranscriberClientTest {
         assertNull(r.error)
     }
 
+    @Test fun `trims success response`() {
+        val r = TranscriberClient.parseResponse("""{"text": " Hello world "}""")
+        assertEquals("Hello world", r.text)
+        assertNull(r.error)
+    }
+
     @Test fun `parses error response`() {
         val r = TranscriberClient.parseResponse("""{"error":{"message":"Invalid key","type":"auth"}}""")
         assertNull(r.text)
-        assertEquals("Invalid key", r.error)
+        assertEquals("HTTP 200: Invalid key", r.error)
     }
 
     @Test fun `handles unknown format`() {
