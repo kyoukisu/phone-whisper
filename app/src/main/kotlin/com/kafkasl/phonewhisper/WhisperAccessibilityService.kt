@@ -38,7 +38,9 @@ class WhisperAccessibilityService : AccessibilityService() {
         private const val BTN_DP = 44
         private const val PAD_DP = 10
         private const val MARGIN_DP = 8
-        private const val TAP_THRESHOLD_DP = 10
+        private const val TAP_THRESHOLD_DP = 22
+        private const val CANCEL_MOVE_THRESHOLD_DP = 36
+        private const val LONG_PRESS_CANCEL_MS = 900L
         private const val RING_DP = 56
         private const val FEEDBACK_OFFSET_DP = 64
 
@@ -178,13 +180,13 @@ class WhisperAccessibilityService : AccessibilityService() {
                     touchX = ev.rawX; touchY = ev.rawY
                     longPressTriggered = false
                     if (state == State.RECORDING) {
-                        handler.postDelayed(longPressCancel, 650)
+                        handler.postDelayed(longPressCancel, LONG_PRESS_CANCEL_MS)
                     }
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val moved = abs(ev.rawX - touchX) + abs(ev.rawY - touchY)
-                    if (moved >= TAP_THRESHOLD_DP * dp) {
+                    if (moved >= CANCEL_MOVE_THRESHOLD_DP * dp) {
                         handler.removeCallbacks(longPressCancel)
                     }
                     params.x = startX + (ev.rawX - touchX).toInt()
@@ -448,6 +450,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         setAppearance(COLOR_RECORDING)
         stopPulse()
         startRecordingTimer()
+        showFeedback("Recording — tap stop, hold cancel", 1200)
 
         thread {
             val buf = ByteArray(bufSize)
@@ -464,6 +467,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         stopRecordingTimer()
         setAppearance(COLOR_BUSY)
         setBusy(true)
+        showFeedback("Transcribing...", 1200)
 
         audioRecord?.stop()
         audioRecord?.release()
