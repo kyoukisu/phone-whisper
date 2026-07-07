@@ -450,7 +450,6 @@ class WhisperAccessibilityService : AccessibilityService() {
         setAppearance(COLOR_RECORDING)
         stopPulse()
         startRecordingTimer()
-        showFeedback("Recording — tap stop, hold cancel", 1200)
 
         thread {
             val buf = ByteArray(bufSize)
@@ -467,7 +466,6 @@ class WhisperAccessibilityService : AccessibilityService() {
         stopRecordingTimer()
         setAppearance(COLOR_BUSY)
         setBusy(true)
-        showFeedback("Transcribing...", 1200)
 
         audioRecord?.stop()
         audioRecord?.release()
