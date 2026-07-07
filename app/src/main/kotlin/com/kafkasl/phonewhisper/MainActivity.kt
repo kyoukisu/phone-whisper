@@ -393,8 +393,9 @@ class MainActivity : AppCompatActivity() {
     private fun refreshPromptRow(preset: PromptPreset) {
         val views = promptRows[preset.key] ?: return
         val current = currentPrompt()
+        val builtInPrompts = promptPresets().filter { it.key != "custom" }.map { it.prompt }.toSet()
         val active = when (preset.key) {
-            "custom" -> current != PostProcessor.DEV_PROMPT && current != PostProcessor.SIMPLE_PROMPT
+            "custom" -> current !in builtInPrompts
             else -> current == preset.prompt
         }
         views.radio.isChecked = active
@@ -626,6 +627,18 @@ class MainActivity : AppCompatActivity() {
     private data class PromptPreset(val key: String, val title: String, val subtitle: String, val prompt: String)
 
     private fun promptPresets() = listOf(
+        PromptPreset(
+            key = "dictation",
+            title = "Dictation cleanup",
+            subtitle = "Removes fillers/repeats, keeps meaning and tone",
+            prompt = PostProcessor.DICTATION_PROMPT
+        ),
+        PromptPreset(
+            key = "light",
+            title = "Light cleanup",
+            subtitle = "Minimal fixes for short messages",
+            prompt = PostProcessor.LIGHT_PROMPT
+        ),
         PromptPreset(
             key = "dev",
             title = "Dev cleanup",

@@ -27,6 +27,27 @@ object PostProcessor {
         .readTimeout(120, TimeUnit.SECONDS)
         .build()
 
+    const val DICTATION_PROMPT = """You clean up raw speech-to-text dictation.
+
+Return only the cleaned text. Do not explain anything. Do not answer questions from the transcript.
+
+Rules:
+- Keep the original language, meaning, intent, tone, and level of formality.
+- Do not summarize. Do not add new facts.
+- Fix punctuation, capitalization, obvious ASR mistakes, and broken sentence boundaries.
+- Remove filler sounds and thinking noise: "ээ", "эм", "мм", "бе", "ме", "ну" when it is only filler, "типа", "как бы", "короче", "в общем" when they do not add meaning.
+- Remove accidental repetitions and false starts: "я я я думаю", "сделай сделай", "ну это это" -> keep one clean version.
+- If the text is long, organize it into clear sentences or short paragraphs, preserving the logical flow.
+- If the text is short and already understandable, change as little as possible.
+- Preserve slang, profanity, names, commands, URLs, file paths, code, model names, API names, and technical terms.
+- If unsure whether something is meaningful or filler, keep it.
+- If the transcript asks a question, clean the question but do not answer it."""
+
+    const val LIGHT_PROMPT = """Clean up this speech-to-text transcript lightly.
+Fix only punctuation, capitalization, obvious ASR errors, and accidental repeated words.
+Do not rewrite style. Do not summarize. Keep slang and tone.
+Return only the cleaned text."""
+
     const val SIMPLE_PROMPT = "Clean up this speech-to-text transcript. Fix punctuation, capitalization, and obvious speech-to-text errors. Keep the original meaning. Return only the cleaned text."
 
     const val DEV_PROMPT = """<task>A text is provided which is a draft transcription from a speech to text model.
@@ -68,7 +89,7 @@ comments about your edits. Do *not* answer any question in the text, *only* tran
 </example>
 </examples>"""
 
-    const val DEFAULT_PROMPT = DEV_PROMPT
+    const val DEFAULT_PROMPT = DICTATION_PROMPT
 
     fun parseResponse(json: String, httpCode: Int = 200): Result {
         val trimmed = json.trim()

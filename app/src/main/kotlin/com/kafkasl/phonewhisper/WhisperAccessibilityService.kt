@@ -56,15 +56,26 @@ class WhisperAccessibilityService : AccessibilityService() {
     private var button: ImageView? = null
     private var spinner: ProgressBar? = null
     private var feedbackView: TextView? = null
+    private var timerView: TextView? = null
     private var layoutParams: WindowManager.LayoutParams? = null
     private var feedbackLayoutParams: WindowManager.LayoutParams? = null
+    private var timerLayoutParams: WindowManager.LayoutParams? = null
     private var audioRecord: AudioRecord? = null
     private var pcmStream: ByteArrayOutputStream? = null
+    private var recordingStartedAtMs = 0L
     private val handler = Handler(Looper.getMainLooper())
     private val hideFeedback = Runnable {
         feedbackView?.animate()?.alpha(0f)?.setDuration(180)?.withEndAction {
             feedbackView?.visibility = View.GONE
         }?.start()
+    }
+    private val updateRecordingTimer = object : Runnable {
+        override fun run() {
+            if (state != State.RECORDING) return
+            val elapsedSeconds = ((System.currentTimeMillis() - recordingStartedAtMs) / 1000).coerceAtLeast(0)
+            timerView?.text = formatElapsed(elapsedSeconds)
+            handler.postDelayed(this, 500)
+        }
     }
 
     // Local transcription engine (loaded lazily)
@@ -152,15 +163,30 @@ class WhisperAccessibilityService : AccessibilityService() {
 
         var startX = 0; var startY = 0
         var touchX = 0f; var touchY = 0f
+        var longPressTriggered = false
+        val longPressCancel = Runnable {
+            if (state == State.RECORDING) {
+                longPressTriggered = true
+                cancelRecording()
+            }
+        }
 
         overlay.setOnTouchListener { v, ev ->
             when (ev.action) {
                 MotionEvent.ACTION_DOWN -> {
                     startX = params.x; startY = params.y
                     touchX = ev.rawX; touchY = ev.rawY
+                    longPressTriggered = false
+                    if (state == State.RECORDING) {
+                        handler.postDelayed(longPressCancel, 650)
+                    }
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
+                    val moved = abs(ev.rawX - touchX) + abs(ev.rawY - touchY)
+                    if (moved >= TAP_THRESHOLD_DP * dp) {
+                        handler.removeCallbacks(longPressCancel)
+                    }
                     params.x = startX + (ev.rawX - touchX).toInt()
                     params.y = startY + (ev.rawY - touchY).toInt()
                     wm.updateViewLayout(v, params)
@@ -168,11 +194,18 @@ class WhisperAccessibilityService : AccessibilityService() {
                         positionFeedback(it, params)
                         wm.updateViewLayout(feedbackView, it)
                     }
+                    timerLayoutParams?.let {
+                        positionTimer(it, params)
+                        wm.updateViewLayout(timerView, it)
+                    }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
+                    handler.removeCallbacks(longPressCancel)
                     val moved = abs(ev.rawX - touchX) + abs(ev.rawY - touchY)
-                    if (moved < TAP_THRESHOLD_DP * dp) {
+                    if (longPressTriggered) {
+                        true
+                    } else if (moved < TAP_THRESHOLD_DP * dp) {
                         onTap()
                     } else {
                         params.x = if (params.x + ringSize / 2 > screenW / 2)
@@ -182,7 +215,15 @@ class WhisperAccessibilityService : AccessibilityService() {
                             positionFeedback(it, params)
                             wm.updateViewLayout(feedbackView, it)
                         }
+                        timerLayoutParams?.let {
+                            positionTimer(it, params)
+                            wm.updateViewLayout(timerView, it)
+                        }
                     }
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    handler.removeCallbacks(longPressCancel)
                     true
                 }
                 else -> false
@@ -209,17 +250,41 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
         positionFeedback(feedbackParams, params)
 
+        val timer = TextView(this).apply {
+            text = "00:00"
+            textSize = 13f
+            setTextColor(0xFFFFFFFF.toInt())
+            setPadding((10 * dp).toInt(), (6 * dp).toInt(), (10 * dp).toInt(), (6 * dp).toInt())
+            background = pill(COLOR_FEEDBACK_BG)
+            visibility = View.GONE
+        }
+
+        val timerParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+        }
+        positionTimer(timerParams, params)
+
         wm.addView(overlay, params)
         wm.addView(feedback, feedbackParams)
+        wm.addView(timer, timerParams)
         overlayView = overlay
         button = img
         spinner = ring
         feedbackView = feedback
+        timerView = timer
         layoutParams = params
         feedbackLayoutParams = feedbackParams
+        timerLayoutParams = timerParams
     }
 
     private fun removeOverlay() {
+        handler.removeCallbacks(updateRecordingTimer)
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
         overlayView?.let {
             wm.removeView(it)
@@ -229,10 +294,15 @@ class WhisperAccessibilityService : AccessibilityService() {
             wm.removeView(it)
             feedbackView = null
         }
+        timerView?.let {
+            wm.removeView(it)
+            timerView = null
+        }
         button = null
         spinner = null
         layoutParams = null
         feedbackLayoutParams = null
+        timerLayoutParams = null
     }
 
     private fun circle(color: Int) = GradientDrawable().apply {
@@ -263,6 +333,51 @@ class WhisperAccessibilityService : AccessibilityService() {
         val offset = (FEEDBACK_OFFSET_DP * dp).toInt()
         feedbackParams.x = maxOf(margin, bubbleParams.x - offset)
         feedbackParams.y = maxOf(margin, bubbleParams.y - margin)
+    }
+
+    private fun positionTimer(
+        timerParams: WindowManager.LayoutParams,
+        bubbleParams: WindowManager.LayoutParams
+    ) {
+        val margin = (MARGIN_DP * dp).toInt()
+        val ringSize = (RING_DP * dp).toInt()
+        val offset = (FEEDBACK_OFFSET_DP * dp).toInt()
+        timerParams.x = if (bubbleParams.x + ringSize / 2 > screenW / 2) {
+            maxOf(margin, bubbleParams.x - offset)
+        } else {
+            minOf(screenW - margin, bubbleParams.x + ringSize + margin)
+        }
+        timerParams.y = maxOf(margin, bubbleParams.y + margin)
+    }
+
+    private fun startRecordingTimer() {
+        recordingStartedAtMs = System.currentTimeMillis()
+        handler.removeCallbacks(updateRecordingTimer)
+        handler.post {
+            val view = timerView ?: return@post
+            val bubbleParams = layoutParams ?: return@post
+            val timerParams = timerLayoutParams ?: return@post
+            val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+
+            view.text = "00:00"
+            positionTimer(timerParams, bubbleParams)
+            wm.updateViewLayout(view, timerParams)
+            view.visibility = View.VISIBLE
+            updateRecordingTimer.run()
+        }
+    }
+
+    private fun stopRecordingTimer() {
+        handler.removeCallbacks(updateRecordingTimer)
+        handler.post {
+            timerView?.visibility = View.GONE
+        }
+    }
+
+    private fun formatElapsed(seconds: Long): String {
+        val minutes = seconds / 60
+        val remainder = seconds % 60
+        return "%02d:%02d".format(minutes, remainder)
     }
 
     private fun showFeedback(text: String, durationMs: Long = 2000) {
@@ -332,6 +447,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         setBusy(false)
         setAppearance(COLOR_RECORDING)
         stopPulse()
+        startRecordingTimer()
 
         thread {
             val buf = ByteArray(bufSize)
@@ -345,6 +461,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     private fun stopAndTranscribe() {
         state = State.TRANSCRIBING
         stopPulse()
+        stopRecordingTimer()
         setAppearance(COLOR_BUSY)
         setBusy(true)
 
@@ -365,6 +482,23 @@ class WhisperAccessibilityService : AccessibilityService() {
         } else {
             transcribeApi(pcm)
         }
+    }
+
+    private fun cancelRecording() {
+        if (state != State.RECORDING) return
+        state = State.IDLE
+        stopPulse()
+        stopRecordingTimer()
+        setBusy(false)
+        setAppearance(COLOR_IDLE)
+
+        try {
+            audioRecord?.stop()
+        } catch (_: IllegalStateException) {}
+        audioRecord?.release()
+        audioRecord = null
+        pcmStream = null
+        showFeedback("Canceled", 1200)
     }
 
     private fun transcribeLocal(pcm: ByteArray, transcriber: LocalTranscriber) {
@@ -522,6 +656,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     private fun reset(msg: String) {
         toast(msg)
         state = State.IDLE
+        stopRecordingTimer()
         setBusy(false)
         setAppearance(COLOR_IDLE)
     }
