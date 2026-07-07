@@ -5,12 +5,16 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 
 object TranscriberClient {
     const val OPENAI_ENDPOINT = "https://api.openai.com/v1/audio/transcriptions"
     const val OPENAI_MODEL = "whisper-1"
     const val GROQ_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions"
     const val GROQ_MODEL = "whisper-large-v3-turbo"
+    const val TOGETHER_ENDPOINT = "https://api.together.ai/v1/audio/transcriptions"
+    const val TOGETHER_PARAKEET_MODEL = "nvidia/parakeet-tdt-0.6b-v3"
+    const val TOGETHER_WHISPER_MODEL = "openai/whisper-large-v3"
 
     const val DEFAULT_ENDPOINT = GROQ_ENDPOINT
     const val DEFAULT_MODEL = GROQ_MODEL
@@ -18,7 +22,11 @@ object TranscriberClient {
 
     data class Result(val text: String?, val error: String?)
 
-    private val client = OkHttpClient()
+    private val client = OkHttpClient.Builder()
+        .protocols(listOf(Protocol.HTTP_1_1))
+        .callTimeout(120, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
+        .build()
 
     fun parseResponse(json: String, httpCode: Int = 200): Result {
         val trimmed = json.trim()

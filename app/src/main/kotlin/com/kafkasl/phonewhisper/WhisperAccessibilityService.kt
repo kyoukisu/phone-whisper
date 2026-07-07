@@ -398,24 +398,66 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     private fun transcribeApi(pcm: ByteArray) {
         val wav = WavWriter.encode(pcm)
-        migrateGroqDefaultsIfNeeded()
-        val apiKey = prefs().getString("api_key", "") ?: ""
-        if (apiKey.isBlank()) { reset("Set API key in Phone Whisper app"); return }
+        CloudProfiles.migrateLegacy(prefs())
 
-        val endpoint = prefs().getString("stt_endpoint", TranscriberClient.DEFAULT_ENDPOINT) ?: TranscriberClient.DEFAULT_ENDPOINT
-        val model = prefs().getString("stt_model", TranscriberClient.DEFAULT_MODEL) ?: TranscriberClient.DEFAULT_MODEL
-        val language = prefs().getString("stt_language", TranscriberClient.DEFAULT_LANGUAGE) ?: TranscriberClient.DEFAULT_LANGUAGE
+        val preset = CloudProfiles.activeSttPreset(prefs())
+        val provider = CloudProfiles.provider(preset.providerId)
+        val apiKey = CloudProfiles.activeSttApiKey(prefs())
+        if (apiKey.isBlank()) { reset("Set ${provider.title} API key in Phone Whisper app"); return }
 
+        transcribeApiWithRetry(
+            wav = wav,
+            apiKey = apiKey,
+            endpoint = CloudProfiles.activeSttEndpoint(prefs()),
+            model = CloudProfiles.activeSttModel(prefs()),
+            language = CloudProfiles.activeSttLanguage(prefs()),
+            preset = preset
+        )
+    }
+
+    private fun transcribeApiWithRetry(
+        wav: ByteArray,
+        apiKey: String,
+        endpoint: String,
+        model: String,
+        language: String,
+        preset: CloudProfiles.SttPreset,
+        attempt: Int = 0,
+        usingFallback: Boolean = false
+    ) {
         TranscriberClient.transcribe(wav, apiKey, endpoint, model, language) { result ->
             if (result.text != null && result.text.isNotBlank()) {
                 handleTranscriptionResult(result.text)
-            } else {
-                handler.post {
-                    toast("Error: ${result.error ?: "empty transcript"}")
-                    state = State.IDLE
-                    setBusy(false)
-                    setAppearance(COLOR_IDLE)
-                }
+                return@transcribe
+            }
+
+            val emptyText = result.error == null
+            if (emptyText && preset.retryOnEmpty && attempt == 0) {
+                Log.i(TAG, "Empty STT response; retrying ${preset.title}")
+                transcribeApiWithRetry(wav, apiKey, endpoint, model, language, preset, attempt = 1)
+                return@transcribe
+            }
+
+            if (emptyText && !usingFallback && preset.fallbackModel.isNotBlank() && model != preset.fallbackModel) {
+                Log.i(TAG, "Empty STT response; trying fallback model ${preset.fallbackModel}")
+                transcribeApiWithRetry(
+                    wav = wav,
+                    apiKey = apiKey,
+                    endpoint = endpoint,
+                    model = preset.fallbackModel,
+                    language = language,
+                    preset = preset,
+                    attempt = 0,
+                    usingFallback = true
+                )
+                return@transcribe
+            }
+
+            handler.post {
+                toast("Error: ${result.error ?: "empty transcript"}")
+                state = State.IDLE
+                setBusy(false)
+                setAppearance(COLOR_IDLE)
             }
         }
     }
@@ -432,14 +474,16 @@ class WhisperAccessibilityService : AccessibilityService() {
             return
         }
 
-        migrateGroqDefaultsIfNeeded()
+        CloudProfiles.migrateLegacy(prefs())
         val usePostProcessing = prefs().getBoolean("use_post_processing", false)
-        val apiKey = prefs().getString("api_key", "") ?: ""
+        val apiKey = CloudProfiles.activeChatApiKey(prefs())
+        val chatPreset = CloudProfiles.activeChatPreset(prefs())
+        val chatProvider = CloudProfiles.provider(chatPreset.providerId)
 
         if (usePostProcessing) {
             if (apiKey.isBlank()) {
                 handler.post {
-                    toast("Post-processing needs API key. Using raw text.")
+                    toast("Cleanup needs ${chatProvider.title} API key. Using raw text.")
                     injectText(transcript)
                     state = State.IDLE
                     setBusy(false)
@@ -450,8 +494,8 @@ class WhisperAccessibilityService : AccessibilityService() {
 
             val prompt = prefs().getString("post_processing_prompt", PostProcessor.DEFAULT_PROMPT) ?: PostProcessor.DEFAULT_PROMPT
             
-            val endpoint = prefs().getString("chat_endpoint", PostProcessor.DEFAULT_ENDPOINT) ?: PostProcessor.DEFAULT_ENDPOINT
-            val model = prefs().getString("chat_model", PostProcessor.DEFAULT_MODEL) ?: PostProcessor.DEFAULT_MODEL
+            val endpoint = CloudProfiles.activeChatEndpoint(prefs())
+            val model = CloudProfiles.activeChatModel(prefs())
 
             PostProcessor.process(transcript, prompt, apiKey, endpoint, model) { result ->
                 handler.post {
@@ -671,47 +715,6 @@ class WhisperAccessibilityService : AccessibilityService() {
             TAG,
             "$prefix package=${node.packageName} class=${node.className} focused=${node.isFocused} editable=${node.isEditable} actionCount=${node.actionList.size}"
         )
-    }
-
-    private fun migrateGroqDefaultsIfNeeded() {
-        val p = prefs()
-        val apiKey = p.getString("api_key", "").orEmpty()
-        if (!apiKey.startsWith("gsk_")) return
-
-        val edit = p.edit()
-        var changed = false
-
-        fun putStringIfNeeded(key: String, value: String) {
-            edit.putString(key, value)
-            changed = true
-        }
-
-        val sttEndpoint = p.getString("stt_endpoint", "").orEmpty()
-        if (!sttEndpoint.startsWith("https://api.groq.com/")) {
-            putStringIfNeeded("stt_endpoint", TranscriberClient.GROQ_ENDPOINT)
-        }
-
-        val sttModel = p.getString("stt_model", "").orEmpty()
-        if (sttModel.isBlank() || sttModel == TranscriberClient.OPENAI_MODEL) {
-            putStringIfNeeded("stt_model", TranscriberClient.GROQ_MODEL)
-        }
-
-        val sttLanguage = p.getString("stt_language", "").orEmpty()
-        if (sttLanguage.isBlank()) {
-            putStringIfNeeded("stt_language", TranscriberClient.DEFAULT_LANGUAGE)
-        }
-
-        val chatEndpoint = p.getString("chat_endpoint", "").orEmpty()
-        if (!chatEndpoint.startsWith("https://api.groq.com/")) {
-            putStringIfNeeded("chat_endpoint", PostProcessor.GROQ_ENDPOINT)
-        }
-
-        val chatModel = p.getString("chat_model", "").orEmpty()
-        if (chatModel.isBlank() || chatModel == PostProcessor.OPENAI_MODEL) {
-            putStringIfNeeded("chat_model", PostProcessor.GROQ_MODEL)
-        }
-
-        if (changed) edit.apply()
     }
 
     private fun prefs() = getSharedPreferences("phonewhisper", MODE_PRIVATE)

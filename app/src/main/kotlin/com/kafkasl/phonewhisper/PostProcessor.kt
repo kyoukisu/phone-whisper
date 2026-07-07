@@ -6,19 +6,26 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 
 object PostProcessor {
     const val OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions"
     const val OPENAI_MODEL = "gpt-4o-mini"
     const val GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
     const val GROQ_MODEL = "llama-3.1-8b-instant"
+    const val TOGETHER_ENDPOINT = "https://api.together.ai/v1/chat/completions"
+    const val TOGETHER_MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
 
     const val DEFAULT_ENDPOINT = GROQ_ENDPOINT
     const val DEFAULT_MODEL = GROQ_MODEL
 
     data class Result(val text: String?, val error: String?)
 
-    private val client = OkHttpClient()
+    private val client = OkHttpClient.Builder()
+        .protocols(listOf(Protocol.HTTP_1_1))
+        .callTimeout(120, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
+        .build()
 
     const val SIMPLE_PROMPT = "Clean up this speech-to-text transcript. Fix punctuation, capitalization, and obvious speech-to-text errors. Keep the original meaning. Return only the cleaned text."
 

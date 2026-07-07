@@ -27,7 +27,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusSubtitle: TextView
     private lateinit var audioRowSub: TextView
     private lateinit var accRowSub: TextView
-    private lateinit var keyRowSub: TextView
+    private lateinit var sttPresetRowSub: TextView
+    private lateinit var chatPresetRowSub: TextView
+    private lateinit var groqKeyRowSub: TextView
+    private lateinit var togetherKeyRowSub: TextView
+    private lateinit var openAiKeyRowSub: TextView
+    private lateinit var customKeyRowSub: TextView
     private lateinit var sttEndpointRowSub: TextView
     private lateinit var sttModelRowSub: TextView
     private lateinit var languageRowSub: TextView
@@ -136,36 +141,71 @@ class MainActivity : AppCompatActivity() {
         promptRowSub.ellipsize = android.text.TextUtils.TruncateAt.END
         root.addView(promptRow)
 
-        // --- Settings Section ---
-        root.addView(sectionHeader("Settings"))
-        
-        val keyRow = settingsRow("API key", "Tap to set") { promptApiKey() }
-        keyRowSub = keyRow.findViewWithTag("subtitle")
-        root.addView(keyRow)
+        // --- Cloud Provider Section ---
+        root.addView(sectionHeader("Provider presets"))
+
+        val sttPresetRow = settingsRow("STT preset", sttPresetSummary()) { promptSttPreset() }
+        sttPresetRowSub = sttPresetRow.findViewWithTag("subtitle")
+        root.addView(sttPresetRow)
+
+        val chatPresetRow = settingsRow("Cleanup preset", chatPresetSummary()) { promptChatPreset() }
+        chatPresetRowSub = chatPresetRow.findViewWithTag("subtitle")
+        root.addView(chatPresetRow)
+
+        root.addView(sectionHeader("Provider API keys"))
+
+        val groqKeyRow = settingsRow("Groq API key", "Tap to set") {
+            promptProviderApiKey(CloudProfiles.PROVIDER_GROQ)
+        }
+        groqKeyRowSub = groqKeyRow.findViewWithTag("subtitle")
+        root.addView(groqKeyRow)
+
+        val togetherKeyRow = settingsRow("Together API key", "Tap to set") {
+            promptProviderApiKey(CloudProfiles.PROVIDER_TOGETHER)
+        }
+        togetherKeyRowSub = togetherKeyRow.findViewWithTag("subtitle")
+        root.addView(togetherKeyRow)
+
+        val openAiKeyRow = settingsRow("OpenAI API key", "Tap to set") {
+            promptProviderApiKey(CloudProfiles.PROVIDER_OPENAI)
+        }
+        openAiKeyRowSub = openAiKeyRow.findViewWithTag("subtitle")
+        root.addView(openAiKeyRow)
+
+        val customKeyRow = settingsRow("Custom API key", "Tap to set") {
+            promptProviderApiKey(CloudProfiles.PROVIDER_CUSTOM)
+        }
+        customKeyRowSub = customKeyRow.findViewWithTag("subtitle")
+        root.addView(customKeyRow)
+
+        root.addView(sectionHeader("Advanced"))
 
         val sttEndpointRow = settingsRow("STT endpoint", sttEndpoint()) {
+            prefs().edit().putString("stt_preset", CloudProfiles.STT_CUSTOM).apply()
             promptStringSetting(
                 title = "STT endpoint",
                 prefKey = "stt_endpoint",
                 defaultValue = TranscriberClient.DEFAULT_ENDPOINT,
-                hint = "https://api.groq.com/openai/v1/audio/transcriptions"
+                hint = "https://api.together.ai/v1/audio/transcriptions"
             )
         }
         sttEndpointRowSub = sttEndpointRow.findViewWithTag("subtitle")
         root.addView(sttEndpointRow)
 
         val sttModelRow = settingsRow("STT model", sttModel()) {
+            prefs().edit().putString("stt_preset", CloudProfiles.STT_CUSTOM).apply()
             promptStringSetting(
                 title = "STT model",
                 prefKey = "stt_model",
                 defaultValue = TranscriberClient.DEFAULT_MODEL,
-                hint = "whisper-large-v3-turbo"
+                hint = "nvidia/parakeet-tdt-0.6b-v3"
             )
         }
         sttModelRowSub = sttModelRow.findViewWithTag("subtitle")
         root.addView(sttModelRow)
 
         val languageRow = settingsRow("Language", languageSummary()) {
+            prefs().edit().putString("stt_preset", CloudProfiles.STT_CUSTOM).apply()
             promptStringSetting(
                 title = "Language code",
                 prefKey = "stt_language",
@@ -177,22 +217,24 @@ class MainActivity : AppCompatActivity() {
         root.addView(languageRow)
 
         val chatEndpointRow = settingsRow("Cleanup endpoint", chatEndpoint()) {
+            prefs().edit().putString("chat_preset", CloudProfiles.CHAT_CUSTOM).apply()
             promptStringSetting(
                 title = "Cleanup endpoint",
                 prefKey = "chat_endpoint",
                 defaultValue = PostProcessor.DEFAULT_ENDPOINT,
-                hint = "https://api.groq.com/openai/v1/chat/completions"
+                hint = "https://api.together.ai/v1/chat/completions"
             )
         }
         chatEndpointRowSub = chatEndpointRow.findViewWithTag("subtitle")
         root.addView(chatEndpointRow)
 
         val chatModelRow = settingsRow("Cleanup model", chatModel()) {
+            prefs().edit().putString("chat_preset", CloudProfiles.CHAT_CUSTOM).apply()
             promptStringSetting(
                 title = "Cleanup model",
                 prefKey = "chat_model",
                 defaultValue = PostProcessor.DEFAULT_MODEL,
-                hint = "llama-3.1-8b-instant"
+                hint = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
             )
         }
         chatModelRowSub = chatModelRow.findViewWithTag("subtitle")
@@ -364,13 +406,14 @@ class MainActivity : AppCompatActivity() {
     // --- State Updates ---
 
     private fun refresh() {
-        migrateGroqDefaultsIfNeeded()
+        CloudProfiles.migrateLegacy(prefs())
 
         val audio = hasPerm(Manifest.permission.RECORD_AUDIO)
         val acc = WhisperAccessibilityService.instance != null
         val useLocal = prefs().getBoolean("use_local", true)
         val usePostProcessing = prefs().getBoolean("use_post_processing", false)
-        val hasKey = !prefs().getString("api_key", "").isNullOrBlank()
+        val hasSttKey = CloudProfiles.activeSttApiKey(prefs()).isNotBlank()
+        val hasChatKey = CloudProfiles.activeChatApiKey(prefs()).isNotBlank()
         val hasModel = LocalTranscriber.availableModels(this).isNotEmpty()
 
         audioRowSub.text = if (audio) "Granted" else "Tap to grant permission"
@@ -380,9 +423,12 @@ class MainActivity : AppCompatActivity() {
         promptContainer.visibility = if (usePostProcessing) View.VISIBLE else View.GONE
         promptRow.visibility = if (usePostProcessing) View.VISIBLE else View.GONE
 
-        val apiKey = prefs().getString("api_key", "") ?: ""
-        keyRowSub.text = if (apiKey.isBlank()) "Tap to set"
-                         else "••••${apiKey.takeLast(4)}"
+        sttPresetRowSub.text = sttPresetSummary()
+        chatPresetRowSub.text = chatPresetSummary()
+        groqKeyRowSub.text = CloudProfiles.keySummary(prefs(), CloudProfiles.PROVIDER_GROQ)
+        togetherKeyRowSub.text = CloudProfiles.keySummary(prefs(), CloudProfiles.PROVIDER_TOGETHER)
+        openAiKeyRowSub.text = CloudProfiles.keySummary(prefs(), CloudProfiles.PROVIDER_OPENAI)
+        customKeyRowSub.text = CloudProfiles.keySummary(prefs(), CloudProfiles.PROVIDER_CUSTOM)
         sttEndpointRowSub.text = sttEndpoint()
         sttModelRowSub.text = sttModel()
         languageRowSub.text = languageSummary()
@@ -400,8 +446,8 @@ class MainActivity : AppCompatActivity() {
 
         // Ready logic
         val localReady = useLocal && hasModel
-        val cloudReady = !useLocal && hasKey
-        val postReady = !usePostProcessing || hasKey
+        val cloudReady = !useLocal && hasSttKey
+        val postReady = !usePostProcessing || hasChatKey
         val ready = audio && acc && (localReady || cloudReady) && postReady
 
         statusSubtitle.text = if (ready) "Ready — tap the overlay dot to dictate" else "Setup required"
@@ -411,19 +457,44 @@ class MainActivity : AppCompatActivity() {
         refreshPromptRows()
     }
 
-    private fun promptApiKey() {
+    private fun promptProviderApiKey(providerId: String) {
+        val provider = CloudProfiles.provider(providerId)
         val input = EditText(this).apply {
-            hint = "API key"
-            setText(prefs().getString("api_key", ""))
+            hint = provider.keyHint
+            setText(CloudProfiles.apiKey(prefs(), providerId))
         }
         android.app.AlertDialog.Builder(this)
-            .setTitle("API key")
+            .setTitle("${provider.title} API key")
             .setView(input.apply { setPadding(dp(24), dp(8), dp(24), dp(8)) })
             .setPositiveButton("Save") { _, _ ->
-                prefs().edit().putString("api_key", input.text.toString().trim()).apply()
+                prefs().edit()
+                    .putString(CloudProfiles.apiKeyPref(providerId), input.text.toString().trim())
+                    .apply()
                 refresh()
             }
             .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun promptSttPreset() {
+        val items = CloudProfiles.STT_PRESETS.map { "${it.title}\n${it.subtitle}" }.toTypedArray()
+        android.app.AlertDialog.Builder(this)
+            .setTitle("STT preset")
+            .setItems(items) { _, which ->
+                prefs().edit().putString("stt_preset", CloudProfiles.STT_PRESETS[which].key).apply()
+                refresh()
+            }
+            .show()
+    }
+
+    private fun promptChatPreset() {
+        val items = CloudProfiles.CHAT_PRESETS.map { "${it.title}\n${it.subtitle}" }.toTypedArray()
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Cleanup preset")
+            .setItems(items) { _, which ->
+                prefs().edit().putString("chat_preset", CloudProfiles.CHAT_PRESETS[which].key).apply()
+                refresh()
+            }
             .show()
     }
 
@@ -533,54 +604,17 @@ class MainActivity : AppCompatActivity() {
         setPadding(padH, padV, padH, padV)
     }
 
-    private fun migrateGroqDefaultsIfNeeded() {
-        val p = prefs()
-        val apiKey = p.getString("api_key", "").orEmpty()
-        if (!apiKey.startsWith("gsk_")) return
-
-        val edit = p.edit()
-        var changed = false
-
-        fun putStringIfNeeded(key: String, value: String) {
-            edit.putString(key, value)
-            changed = true
-        }
-
-        val sttEndpoint = p.getString("stt_endpoint", "").orEmpty()
-        if (!sttEndpoint.startsWith("https://api.groq.com/")) {
-            putStringIfNeeded("stt_endpoint", TranscriberClient.GROQ_ENDPOINT)
-        }
-
-        val sttModel = p.getString("stt_model", "").orEmpty()
-        if (sttModel.isBlank() || sttModel == TranscriberClient.OPENAI_MODEL) {
-            putStringIfNeeded("stt_model", TranscriberClient.GROQ_MODEL)
-        }
-
-        val sttLanguage = p.getString("stt_language", "").orEmpty()
-        if (sttLanguage.isBlank()) {
-            putStringIfNeeded("stt_language", TranscriberClient.DEFAULT_LANGUAGE)
-        }
-
-        val chatEndpoint = p.getString("chat_endpoint", "").orEmpty()
-        if (!chatEndpoint.startsWith("https://api.groq.com/")) {
-            putStringIfNeeded("chat_endpoint", PostProcessor.GROQ_ENDPOINT)
-        }
-
-        val chatModel = p.getString("chat_model", "").orEmpty()
-        if (chatModel.isBlank() || chatModel == PostProcessor.OPENAI_MODEL) {
-            putStringIfNeeded("chat_model", PostProcessor.GROQ_MODEL)
-        }
-
-        if (changed) edit.apply()
-    }
-
     private fun currentPrompt() = prefs().getString("post_processing_prompt", PostProcessor.DEFAULT_PROMPT) ?: PostProcessor.DEFAULT_PROMPT
     private fun customPrompt() = prefs().getString("custom_post_processing_prompt", PostProcessor.DEFAULT_PROMPT) ?: PostProcessor.DEFAULT_PROMPT
-    private fun sttEndpoint() = prefs().getString("stt_endpoint", TranscriberClient.DEFAULT_ENDPOINT) ?: TranscriberClient.DEFAULT_ENDPOINT
-    private fun sttModel() = prefs().getString("stt_model", TranscriberClient.DEFAULT_MODEL) ?: TranscriberClient.DEFAULT_MODEL
-    private fun sttLanguage() = prefs().getString("stt_language", TranscriberClient.DEFAULT_LANGUAGE) ?: TranscriberClient.DEFAULT_LANGUAGE
-    private fun chatEndpoint() = prefs().getString("chat_endpoint", PostProcessor.DEFAULT_ENDPOINT) ?: PostProcessor.DEFAULT_ENDPOINT
-    private fun chatModel() = prefs().getString("chat_model", PostProcessor.DEFAULT_MODEL) ?: PostProcessor.DEFAULT_MODEL
+    private fun sttPreset() = CloudProfiles.activeSttPreset(prefs())
+    private fun chatPreset() = CloudProfiles.activeChatPreset(prefs())
+    private fun sttPresetSummary() = "${sttPreset().title} · ${CloudProfiles.provider(sttPreset().providerId).title}"
+    private fun chatPresetSummary() = "${chatPreset().title} · ${CloudProfiles.provider(chatPreset().providerId).title}"
+    private fun sttEndpoint() = CloudProfiles.activeSttEndpoint(prefs())
+    private fun sttModel() = CloudProfiles.activeSttModel(prefs())
+    private fun sttLanguage() = CloudProfiles.activeSttLanguage(prefs())
+    private fun chatEndpoint() = CloudProfiles.activeChatEndpoint(prefs())
+    private fun chatModel() = CloudProfiles.activeChatModel(prefs())
     private fun languageSummary() = sttLanguage().ifBlank { "Auto" }
 
     private fun customPromptSummary(): String {
