@@ -476,13 +476,14 @@ class WhisperAccessibilityService : AccessibilityService() {
 
         if (pcm.isEmpty()) { reset("No audio captured"); return }
 
+        val durationSeconds = audioDurationSeconds(pcm)
         val useLocal = prefs().getBoolean("use_local", true)
         val local = localTranscriber
 
         if (useLocal && local != null) {
-            transcribeLocal(pcm, local)
+            transcribeLocal(pcm, local, durationSeconds)
         } else {
-            transcribeApi(pcm)
+            transcribeApi(pcm, durationSeconds)
         }
     }
 
@@ -503,7 +504,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         showFeedback("Canceled", 1200)
     }
 
-    private fun transcribeLocal(pcm: ByteArray, transcriber: LocalTranscriber) {
+    private fun transcribeLocal(pcm: ByteArray, transcriber: LocalTranscriber, audioDurationSeconds: Double) {
         thread {
             try {
                 // Convert 16-bit PCM bytes to float samples
@@ -519,7 +520,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                 val ms = System.currentTimeMillis() - t0
                 Log.i(TAG, "Local transcription: ${ms}ms, ${samples.size / SAMPLE_RATE}s audio")
 
-                handleTranscriptionResult(text)
+                handleTranscriptionResult(text, audioDurationSeconds)
             } catch (e: Exception) {
                 Log.e(TAG, "Local transcription failed", e)
                 handler.post {
@@ -532,7 +533,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun transcribeApi(pcm: ByteArray) {
+    private fun transcribeApi(pcm: ByteArray, audioDurationSeconds: Double) {
         val wav = WavWriter.encode(pcm)
         CloudProfiles.migrateLegacy(prefs())
 
@@ -547,7 +548,8 @@ class WhisperAccessibilityService : AccessibilityService() {
             endpoint = CloudProfiles.activeSttEndpoint(prefs()),
             model = CloudProfiles.activeSttModel(prefs()),
             language = CloudProfiles.activeSttLanguage(prefs()),
-            preset = preset
+            preset = preset,
+            audioDurationSeconds = audioDurationSeconds
         )
     }
 
@@ -558,19 +560,20 @@ class WhisperAccessibilityService : AccessibilityService() {
         model: String,
         language: String,
         preset: CloudProfiles.SttPreset,
+        audioDurationSeconds: Double,
         attempt: Int = 0,
         usingFallback: Boolean = false
     ) {
         TranscriberClient.transcribe(wav, apiKey, endpoint, model, language) { result ->
             if (result.text != null && result.text.isNotBlank()) {
-                handleTranscriptionResult(result.text)
+                handleTranscriptionResult(result.text, audioDurationSeconds)
                 return@transcribe
             }
 
             val emptyText = result.error == null
             if (emptyText && preset.retryOnEmpty && attempt == 0) {
                 Log.i(TAG, "Empty STT response; retrying ${preset.title}")
-                transcribeApiWithRetry(wav, apiKey, endpoint, model, language, preset, attempt = 1)
+                transcribeApiWithRetry(wav, apiKey, endpoint, model, language, preset, audioDurationSeconds, attempt = 1)
                 return@transcribe
             }
 
@@ -583,6 +586,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                     model = preset.fallbackModel,
                     language = language,
                     preset = preset,
+                    audioDurationSeconds = audioDurationSeconds,
                     attempt = 0,
                     usingFallback = true
                 )
@@ -598,7 +602,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun handleTranscriptionResult(text: String?) {
+    private fun handleTranscriptionResult(text: String?, audioDurationSeconds: Double) {
         val transcript = text?.trim().orEmpty()
         if (transcript.isBlank()) {
             handler.post {
@@ -611,7 +615,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
 
         CloudProfiles.migrateLegacy(prefs())
-        val usePostProcessing = prefs().getBoolean("use_post_processing", false)
+        val usePostProcessing = prefs().getBoolean("use_post_processing", false) && audioDurationSeconds > cleanupMinSeconds()
         val apiKey = CloudProfiles.activeChatApiKey(prefs())
         val chatPreset = CloudProfiles.activeChatPreset(prefs())
         val chatProvider = CloudProfiles.provider(chatPreset.providerId)
@@ -654,6 +658,12 @@ class WhisperAccessibilityService : AccessibilityService() {
             }
         }
     }
+
+    private fun audioDurationSeconds(pcm: ByteArray): Double =
+        pcm.size / 2.0 / SAMPLE_RATE
+
+    private fun cleanupMinSeconds(): Int =
+        prefs().getInt("cleanup_min_seconds", 20)
 
     private fun reset(msg: String) {
         toast(msg)

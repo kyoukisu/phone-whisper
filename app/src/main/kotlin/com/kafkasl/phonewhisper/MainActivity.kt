@@ -39,6 +39,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var chatEndpointRowSub: TextView
     private lateinit var chatModelRowSub: TextView
     private lateinit var promptRowSub: TextView
+    private lateinit var cleanupMinSecondsRowSub: TextView
     private lateinit var promptRow: LinearLayout
     private lateinit var modelContainer: LinearLayout
     private lateinit var promptContainer: LinearLayout
@@ -130,6 +131,17 @@ class MainActivity : AppCompatActivity() {
             refresh()
         }
         root.addView(postProcessRow)
+
+        val cleanupMinSecondsRow = settingsRow("Cleanup minimum length", cleanupMinSecondsSummary()) {
+            promptNumberSetting(
+                title = "Cleanup minimum length",
+                prefKey = "cleanup_min_seconds",
+                defaultValue = 20,
+                hint = "20"
+            )
+        }
+        cleanupMinSecondsRowSub = cleanupMinSecondsRow.findViewWithTag("subtitle")
+        root.addView(cleanupMinSecondsRow)
 
         promptContainer = vertical(0)
         for (preset in promptPresets()) promptContainer.addView(buildPromptRow(preset))
@@ -423,6 +435,7 @@ class MainActivity : AppCompatActivity() {
         modelContainer.visibility = if (useLocal) View.VISIBLE else View.GONE
         promptContainer.visibility = if (usePostProcessing) View.VISIBLE else View.GONE
         promptRow.visibility = if (usePostProcessing) View.VISIBLE else View.GONE
+        cleanupMinSecondsRowSub.text = cleanupMinSecondsSummary()
 
         sttPresetRowSub.text = sttPresetSummary()
         chatPresetRowSub.text = chatPresetSummary()
@@ -496,6 +509,34 @@ class MainActivity : AppCompatActivity() {
                 prefs().edit().putString("chat_preset", CloudProfiles.CHAT_PRESETS[which].key).apply()
                 refresh()
             }
+            .show()
+    }
+
+    private fun promptNumberSetting(
+        title: String,
+        prefKey: String,
+        defaultValue: Int,
+        hint: String
+    ) {
+        val input = EditText(this).apply {
+            this.hint = hint
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setText((prefs().getInt(prefKey, defaultValue)).toString())
+            setSelectAllOnFocus(true)
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(input.apply { setPadding(dp(24), dp(8), dp(24), dp(8)) })
+            .setPositiveButton("Save") { _, _ ->
+                val value = input.text.toString().trim().toIntOrNull() ?: defaultValue
+                prefs().edit().putInt(prefKey, value.coerceAtLeast(0)).apply()
+                refresh()
+            }
+            .setNeutralButton("Reset") { _, _ ->
+                prefs().edit().putInt(prefKey, defaultValue).apply()
+                refresh()
+            }
+            .setNegativeButton("Cancel", null)
             .show()
     }
 
@@ -617,6 +658,8 @@ class MainActivity : AppCompatActivity() {
     private fun chatEndpoint() = CloudProfiles.activeChatEndpoint(prefs())
     private fun chatModel() = CloudProfiles.activeChatModel(prefs())
     private fun languageSummary() = sttLanguage().ifBlank { "Auto" }
+    private fun cleanupMinSeconds() = prefs().getInt("cleanup_min_seconds", 20)
+    private fun cleanupMinSecondsSummary() = "Only if recording is longer than ${cleanupMinSeconds()}s"
 
     private fun customPromptSummary(): String {
         val prompt = customPrompt()
